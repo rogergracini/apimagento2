@@ -1,0 +1,191 @@
+<?php
+
+namespace App\Services;
+
+class XmlParserService
+{
+    /**
+     * NOVO MÉTODO: Carrega e processa o arquivo Imagem.xml para criar um mapa de ImagemID => Timestamp.
+     */
+    public function carregarTimestampsDasImagens(string $caminhoImagemXml): array
+    {
+        if (!file_exists($caminhoImagemXml)) {
+            echo "[AVISO] Arquivo Imagem.xml não encontrado em {$caminhoImagemXml}. A verificação de timestamp de imagem será pulada.\n";
+            return [];
+        }
+
+        $xml = simplexml_load_file($caminhoImagemXml);
+        if ($xml === false) {
+            echo "[ERRO] Falha ao ler o arquivo Imagem.xml.\n";
+            return [];
+        }
+
+        $timestamps = [];
+        foreach ($xml->Row as $row) {
+            $imagemId = (string)$row->ImagemID;
+            $timestamp = (string)$row->Timestamp;
+            if (!empty($imagemId)) {
+                $timestamps[$imagemId] = $timestamp;
+            }
+        }
+        
+        echo "[OK] " . count($timestamps) . " timestamps de imagens carregados do Imagem.xml.\n";
+        return $timestamps;
+    }
+
+    /**
+     * MÉTODO ORIGINAL ATUALIZADO: Agora aceita o array de timestamps para enriquecer os dados.
+     */
+    public function carregarProdutos(string $produtoXmlPath, string $precoXmlPath, array $timestamps, ?string $skuAlvo = null): array
+    {
+        $dadosProdutoTodos = $this->parseXmlParaArray($produtoXmlPath);
+        $dadosPrecoTodos = $this->parseXmlParaArray($precoXmlPath);
+
+        // 1. Recriar a estrutura $lines do seu script M1
+        $lines = [];
+        foreach ($dadosPrecoTodos as $precoItem) {
+            $skuPreco = $precoItem['ProdutoID_Int'] ?? null;
+            $tabelaIdXml = (string)($precoItem['TabelaID_Int'] ?? '');
+            if ($skuPreco && $tabelaIdXml) {
+                if (!isset($lines[$tabelaIdXml])) {
+                    $lines[$tabelaIdXml] = [];
+                }
+                $lines[$tabelaIdXml][$skuPreco] = $precoItem;
+            }
+        }
+
+        // 2. Recriar a lógica de $tables e $magento_refs do seu script M1
+        //$lines['707'] = $lines['707'] ?? []; //2025/041
+        //$lines['708'] = $lines['708'] ?? []; //2025/042
+        //$lines['709'] = $lines['709'] ?? []; //2025/043
+
+        $lines['693'] = $lines['693'] ?? []; //2025/027
+        $lines['694'] = $lines['694'] ?? []; //2025/028
+        $lines['695'] = $lines['695'] ?? []; //2025/029
+        $lines['704'] = $lines['704'] ?? []; //2025/038
+        $lines['705'] = $lines['705'] ?? []; //2025/039
+
+        $tables_aliases = [];
+        $tables_aliases['4'] = array_merge($lines['693'], $lines['704']); //2025/027 + 2025/038
+        $tables_aliases['6'] = array_merge($lines['693'], $lines['705']); //2025/027 + 2025/039
+        $tables_aliases['8'] = array_merge($lines['694'], $lines['704']); //2025/028 + 2025/038
+        $tables_aliases['10'] = array_merge($lines['694'], $lines['705']); //2025/028 + 2025/039
+        $tables_aliases['12'] = array_merge($lines['695'], $lines['704']); //2025/029 + 2025/038
+        $tables_aliases['14'] = array_merge($lines['695'], $lines['705']); //2025/029 + 2025/039
+        $tables_aliases['16'] = array_merge($lines['695'], $lines['705']); //2025/029 + 2025/039   
+
+        $magento_refs_map = [
+            '4' => 5, '6' => 7, '8' => 9, '10' => 11,
+            '12' => 13, '14' => 15, '16' => 17
+        ];
+
+        // 3. Montar a estrutura $produtosComGruposBrutos
+        $produtosComGruposBrutos = [];
+        foreach ($tables_aliases as $aliasChaveTabela => $skusNestaCombinacao) {
+            foreach ($skusNestaCombinacao as $skuProduto => $dadosCombinadosPreco) {
+                if ($skuAlvo && $skuProduto !== $skuAlvo) {
+                    continue;
+                }
+
+                // aqui correção do código
+                if (!isset($produtosComGruposBrutos[$skuProduto])) {
+                    $produtosComGruposBrutos[$skuProduto] = $dadosCombinadosPreco;
+                } else {
+                    // NOVO: Se o SKU já existe, mescla os dados para garantir que o preço mais recente (e mais alto) sobrescreva o antigo.
+                    $produtosComGruposBrutos[$skuProduto] = array_merge($produtosComGruposBrutos[$skuProduto], $dadosCombinadosPreco);
+                }
+
+                if (!isset($produtosComGruposBrutos[$skuProduto]['groups_for_m1_logic'])) {
+                    $produtosComGruposBrutos[$skuProduto]['groups_for_m1_logic'] = [];
+                }
+                
+
+                $valorPrecoBase = $dadosCombinadosPreco['Preco'] ?? 0;
+                $produtosComGruposBrutos[$skuProduto]['groups_for_m1_logic'][] = [(int)$aliasChaveTabela, $valorPrecoBase];
+                
+                if (isset($magento_refs_map[$aliasChaveTabela])) {
+                    $produtosComGruposBrutos[$skuProduto]['groups_for_m1_logic'][] = [$magento_refs_map[$aliasChaveTabela], $valorPrecoBase];
+                }
+            }
+        }
+        
+        foreach ($produtosComGruposBrutos as $skuProduto => &$dataProduto) {
+            if (isset($dataProduto['groups_for_m1_logic'])) {
+                $unique_groups = [];
+                $temp_check = [];
+                foreach ($dataProduto['groups_for_m1_logic'] as $group_item) {
+                    $check_key = $group_item[0] . '_' . $group_item[1];
+                    if (!isset($temp_check[$check_key])) {
+                        $unique_groups[] = $group_item;
+                        $temp_check[$check_key] = true;
+                    }
+                }
+                $dataProduto['groups_for_m1_logic'] = $unique_groups;
+            }
+        }
+        unset($dataProduto);
+
+        // 4. Mesclar com dados do Produto.xml
+        $produtosFinais = [];
+        foreach ($dadosProdutoTodos as $produtoInfo) {
+            $skuProduto = $produtoInfo['ProdutoID_Int'] ?? null;
+            if (!$skuProduto || ($skuAlvo && $skuAlvo !== $skuProduto)) {
+                continue;
+            }
+
+            if (isset($produtosComGruposBrutos[$skuProduto])) {
+                $gruposPreviamenteMontados = $produtosComGruposBrutos[$skuProduto]['groups_for_m1_logic'] ?? [];
+                $produtoFinal = array_merge($produtosComGruposBrutos[$skuProduto], $produtoInfo);
+                $produtoFinal['groups_for_m1_logic'] = $gruposPreviamenteMontados;
+            } else {
+                $produtoFinal = $produtoInfo;
+                $produtoFinal['groups_for_m1_logic'] = [];
+            }
+            
+            // ADICIONA O TIMESTAMP DA IMAGEM
+            $imagemId = $produtoFinal['ImagemID'] ?? '';
+            $produtoFinal['imagem_timestamp'] = $timestamps[$imagemId] ?? null;
+
+            $produtosFinais[$skuProduto] = $produtoFinal;
+        }
+        
+        foreach ($produtosComGruposBrutos as $skuProduto => $dataProduto) {
+            if (!isset($produtosFinais[$skuProduto])) {
+                error_log("AVISO: SKU {$skuProduto} encontrado em Preco.xml mas não em Produto.xml.");
+                $imagemId = $dataProduto['ImagemID'] ?? '';
+                $dataProduto['imagem_timestamp'] = $timestamps[$imagemId] ?? null;
+                $produtosFinais[$skuProduto] = $dataProduto;
+            }
+        }
+
+        if ($skuAlvo) {
+            return isset($produtosFinais[$skuAlvo]) ? [$produtosFinais[$skuAlvo]] : [];
+        }
+
+        return array_values($produtosFinais);
+    }
+
+    private function parseXmlParaArray(string $xmlFilePath): array
+    {
+        if (!file_exists($xmlFilePath)) {
+            error_log("Arquivo XML não encontrado em: " . $xmlFilePath);
+            return [];
+        }
+        libxml_use_internal_errors(true);
+        $xml = simplexml_load_file($xmlFilePath);
+        
+        if ($xml === false) {
+            $errors = libxml_get_errors();
+            $errorMessages = [];
+            foreach ($errors as $error) {
+                $errorMessages[] = trim($error->message) . " na linha " . $error->line;
+            }
+            libxml_clear_errors();
+            throw new \Exception("Erro ao carregar XML de {$xmlFilePath}: " . implode("; ", $errorMessages));
+        }
+
+        $array = json_decode(json_encode($xml), true);
+        if (empty($array) || !isset($array['Row'])) { return []; }
+        return isset($array['Row'][0]) ? $array['Row'] : [$array['Row']];
+    }
+}

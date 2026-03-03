@@ -1,0 +1,20 @@
+# Ignora arquivos de ambiente
+.env
+
+# Ignora arquivos de log
+logs/*
+!logs/.gitkeep
+
+# Cache do Composer
+/vendor/
+
+# Cache do sistema
+*.log
+*.cache
+
+# Ignora arquivos do sistema operacional
+.DS_Store
+Thumbs.db
+
+# Ignora arquivos do VSCode (se usar)
+.vscode/

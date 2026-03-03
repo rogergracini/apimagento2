@@ -1,0 +1,152 @@
+<?php
+
+namespace App\Services;
+
+use App\MagentoApiClient;
+use App\Utils\DownloadHelper; // Certifique-se de que DownloadHelper existe e está no namespace correto
+
+class ImagemService
+{
+    protected MagentoApiClient $client;
+
+    public function __construct()
+    {
+        $this->client = new MagentoApiClient();
+    }
+
+    /**
+     * Gerencia o upload de uma imagem para um produto, verificando duplicatas e removendo se necessário.
+     * @param string $sku O SKU do produto.
+     * @param string|null $imagemId O ImagemID do XML (ex: "123/imagem_produto"). Pode ser null.
+     * @param bool $isPrincipal Indica se esta é a imagem principal a ser tratada (image, small_image, thumbnail).
+     * @return array Resultado da operação.
+     */
+    public function gerenciarImagemProduto(string $sku, ?string $imagemId, bool $isPrincipal = true): array
+    {
+        if (empty($imagemId) || strpos($imagemId, '/') === false) {
+            return ['status' => 'ignorado', 'mensagem' => 'ImagemID inválido ou ausente. Upload de imagem pulado.'];
+        }
+
+        $partes = explode('/', $imagemId);
+        $imageName = end($partes);
+
+        // Garante a extensão .jpg, .jpeg, .png, .gif
+        if (!preg_match('/\.(jpg|jpeg|png|gif)$/i', $imageName)) {
+            $imageName .= '.jpg';
+        }
+
+        $urlImagem = 'http://app.galle.com.br/images/grandes/' . $imagemId . '.jpg';
+        // Ajuste o caminho local conforme sua estrutura de pastas
+        $caminhoLocal = "/home3/pratas31/crgr.com.br/images/$imageName"; // Certifique-se que esta pasta tem permissão de escrita
+
+        error_log("ImagemService::gerenciarImagemProduto - SKU: {$sku} | Processando imagem. URL: {$urlImagem} | Nome: {$imageName}");
+
+        if (!DownloadHelper::baixarImagem($urlImagem, $caminhoLocal)) {
+            // Logar o erro completo de download para depuração
+            error_log("ImagemService::gerenciarImagemProduto - FALHA ao baixar imagem da URL: {$urlImagem}");
+            return ['status' => 'erro', 'mensagem' => "Falha ao baixar imagem da URL: {$urlImagem}"];
+        }
+
+        if (!file_exists($caminhoLocal) || filesize($caminhoLocal) === 0) {
+            error_log("ImagemService::gerenciarImagemProduto - Imagem baixada está vazia ou não existe no caminho: {$caminhoLocal}");
+            return ['status' => 'erro', 'mensagem' => "Imagem baixada está vazia ou não existe no caminho: {$caminhoLocal}"];
+        }
+
+        $imagemBase64 = base64_encode(file_get_contents($caminhoLocal));
+        $tipoMimeImagem = mime_content_type($caminhoLocal);
+
+        // 1. Obter imagens existentes do produto
+        $imagensExistentes = $this->client->getProductImages($sku);
+
+        $mediaEntryIdParaRemover = null;
+        $tiposParaAplicar = ['image', 'small_image', 'thumbnail']; // Tipos padrão para imagem principal
+
+        if (!empty($imagensExistentes)) {
+            foreach ($imagensExistentes as $img) {
+                // Tenta identificar a imagem pelo nome do arquivo (content->name)
+                // ou pela label (que você está definindo como o SKU, mas pode ser o nome do arquivo)
+                if (isset($img['content']['name']) && $img['content']['name'] === $imageName) {
+                    error_log("ImagemService::gerenciarImagemProduto - Imagem EXISTENTE encontrada para SKU {$sku} com nome: {$imageName}. ID: {$img['id']}");
+                    
+                    // Marcar para remoção para garantir que a versão mais recente e os tipos corretos sejam aplicados
+                    $mediaEntryIdParaRemover = $img['id'];
+                    error_log("ImagemService::gerenciarImagemProduto - Imagem existente com o mesmo nome ({$imageName}) será substituída. ID: {$mediaEntryIdParaRemover}");
+                    break; // Encontramos a imagem que queremos substituir/atualizar, podemos parar.
+                }
+            }
+        }
+
+        // 2. Remover imagem antiga se necessário
+        if ($mediaEntryIdParaRemover) {
+            error_log("ImagemService::gerenciarImagemProduto - Deletando imagem antiga com ID: {$mediaEntryIdParaRemover} para SKU: {$sku}");
+            $deleteResult = $this->client->deleteProductImage($sku, $mediaEntryIdParaRemover);
+            if (!$deleteResult) {
+                error_log("ImagemService::gerenciarImagemProduto - FALHA ao deletar imagem antiga ID: {$mediaEntryIdParaRemover}. Isso pode resultar em duplicidade se o upload for bem-sucedido.");
+            } else {
+                error_log("ImagemService::gerenciarImagemProduto - Imagem antiga ID: {$mediaEntryIdParaRemover} deletada com SUCESSO.");
+            }
+        }
+
+        // 3. Preparar payload para a nova imagem
+        $payloadImagem = [
+            'media_type' => 'image',
+            'label'      => $imageName, // Usar o nome do arquivo como label é útil para identificação
+            'position'   => 1, // Geralmente a principal fica na posição 1. Se tiver mais imagens, defina posições diferentes.
+            'disabled'   => false,
+            'types'      => $isPrincipal ? $tiposParaAplicar : [], // Aplica os tipos 'image', 'small_image', 'thumbnail'
+            'content'    => [
+                'base64_encoded_data' => $imagemBase64,
+                'type'                => $tipoMimeImagem,
+                'name'                => $imageName
+            ]
+        ];
+
+        // 4. Enviar a nova imagem
+        error_log("ImagemService::gerenciarImagemProduto - Enviando nova imagem para SKU: {$sku}. Principal: " . ($isPrincipal ? 'SIM' : 'NÃO'));
+        $respostaUpload = $this->client->uploadImageToProduct($sku, $payloadImagem);
+
+        // Limpar o arquivo de origem após o upload, se for temporário
+        @unlink($caminhoLocal);
+
+        if (isset($respostaUpload['error']) && $respostaUpload['error']) {
+            error_log("ImagemService::gerenciarImagemProduto - ERRO API Magento ao fazer upload: " . ($respostaUpload['message'] ?? 'Msg não disponível') . " Detalhes: " . ($respostaUpload['response'] ?? 'Sem detalhes'));
+            return ['status' => 'erro_api', 'mensagem' => 'Erro ao enviar imagem para o Magento', 'detalhes_erro_api' => $respostaUpload['response'] ?? null];
+        } elseif (isset($respostaUpload['success']) && $respostaUpload['success']) {
+            error_log("ImagemService::gerenciarImagemProduto - Upload de imagem BEM-SUCEDIDO. Media entry ID: " . ($respostaUpload['media_id'] ?? 'N/A'));
+            return ['status' => 'sucesso', 'mensagem' => 'Imagem processada com sucesso.', 'media_id' => $respostaUpload['media_id'] ?? null];
+        } else {
+            error_log("ImagemService::gerenciarImagemProduto - Resposta do upload de imagem não é erro explícito nem sucesso esperado. Resposta: " . print_r($respostaUpload, true));
+            return ['status' => 'erro', 'mensagem' => 'Resposta inesperada do Magento ao enviar imagem.'];
+        }
+    }
+
+    // A função enviarImagemProduto original pode ser mantida ou removida,
+    // pois a gerenciarImagemProduto é mais completa. Se não for usada em outro lugar, remova.
+    public function enviarImagemProduto(string $sku, string $caminhoImagem, string $nomeImagem): array
+    {
+        if (!file_exists($caminhoImagem)) {
+            return [
+                'success' => false,
+                'mensagem' => "Arquivo de imagem não encontrado: $caminhoImagem"
+            ];
+        }
+
+        $tipoMime = mime_content_type($caminhoImagem);
+        $conteudoBase64 = base64_encode(file_get_contents($caminhoImagem));
+
+        $payload = [
+            'media_type' => 'image',
+            'label' => $nomeImagem,
+            'position' => 1,
+            'disabled' => false,
+            'types' => ['image', 'small_image', 'thumbnail'],
+            'content' => [
+                'base64_encoded_data' => $conteudoBase64,
+                'type' => $tipoMime,
+                'name' => $nomeImagem
+            ]
+        ];
+
+        return $this->client->uploadImageToProduct($sku, $payload);
+    }
+}

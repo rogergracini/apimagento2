@@ -1,0 +1,136 @@
+<?php
+
+namespace App\Services;
+
+use App\MagentoApiClient;
+
+class ImagemService
+{
+    protected MagentoApiClient $client;
+
+    public function __construct()
+    {
+        $this->client = new MagentoApiClient();
+    }
+
+    public function gerenciarImagemProduto(string $sku, ?string $imagemId, bool $isBaseImage, ?string $timestampXml): array
+    {
+        $resultado = [
+            'status' => 'ignorado',
+            'mensagem' => 'Nenhuma ação de imagem foi necessária.',
+            'foto_valida' => false
+        ];
+
+        if (empty($imagemId)) {
+            $resultado['mensagem'] = 'ImagemID nulo ou vazio no XML.';
+            return $resultado;
+        }
+
+        $imageName = basename($imagemId) . '.jpg';
+        $imageUrl = 'http://app.galle.com.br/images/grandes/' . str_replace('.jpg', '', $imagemId) . '.jpg';
+
+        // Lógica de caminho do Magento para reforçar marcações existentes
+        $firstChar = substr($imageName, 0, 1);
+        $secondChar = substr($imageName, 1, 1);
+        $magentoPath = "/" . $firstChar . "/" . $secondChar . "/" . $imageName;
+
+        $produtoMagento = $this->client->getProductBySku($sku);
+        $timestampMagento = null;
+        
+        if (isset($produtoMagento['custom_attributes'])) {
+            foreach ($produtoMagento['custom_attributes'] as $attr) {
+                if ($attr['attribute_code'] === 'galle_image_timestamp') {
+                    $timestampMagento = $attr['value'];
+                    break;
+                }
+            }
+        }
+        
+        // CONDIÇÃO 1: Imagem já existe e está atualizada
+        if ($timestampXml && $timestampMagento && $timestampXml <= $timestampMagento) {
+            if ($isBaseImage) {
+                // Forçamos os atributos de caminho via PUT para garantir a marcação
+                $this->client->updateProductAttributes($sku, [
+                    ['attribute_code' => 'image', 'value' => $magentoPath],
+                    ['attribute_code' => 'small_image', 'value' => $magentoPath],
+                    ['attribute_code' => 'thumbnail', 'value' => $magentoPath]
+                ]);
+            }
+            $resultado['status'] = 'sucesso';
+            $resultado['mensagem'] = 'Imagem já atualizada (funções reforçadas).';
+            $resultado['foto_valida'] = true;
+            return $resultado;
+        }
+
+        // CONDIÇÃO 2: Nova imagem ou atualização necessária
+        $tempFile = tempnam(sys_get_temp_dir(), 'magento_img_');
+        try {
+            $ch = curl_init($imageUrl);
+            $fp = fopen($tempFile, 'wb');
+            curl_setopt_array($ch, [
+                CURLOPT_FILE => $fp,
+                CURLOPT_FOLLOWLOCATION => true,
+                CURLOPT_TIMEOUT => 30
+            ]);
+            curl_exec($ch);
+            $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+            curl_close($ch);
+            fclose($fp);
+
+            if ($httpCode !== 200) throw new \Exception("Erro no download: HTTP {$httpCode}");
+            
+            $resultado['foto_valida'] = true;
+            $mimeType = mime_content_type($tempFile);
+            $fileContent = base64_encode(file_get_contents($tempFile));
+
+            // Limpa imagens antigas com o mesmo nome para evitar duplicatas na galeria
+            $imagensAtuais = $this->client->getProductImages($sku);
+            if (is_array($imagensAtuais)) {
+                foreach ($imagensAtuais as $img) {
+                    if (isset($img['label']) && $img['label'] === $imageName) {
+                        $this->client->deleteProductImage($sku, $img['id']);
+                    }
+                }
+            }
+            
+            $payload = [
+                'media_type' => 'image',
+                'label' => $imageName,
+                'position' => 1,
+                'disabled' => false,
+                'types' => $isBaseImage ? ['image', 'small_image', 'thumbnail'] : [],
+                'content' => [
+                    'base64_encoded_data' => $fileContent,
+                    'type' => $mimeType,
+                    'name' => $imageName
+                ]
+            ];
+
+            // Envia a imagem
+            $respostaUpload = $this->client->uploadImageToProduct($sku, $payload);
+
+            if (isset($respostaUpload['success']) && $respostaUpload['success']) {
+                $mediaId = (int)$respostaUpload['media_id'];
+                
+                // ### CORREÇÃO DEFINITIVA: Força a marcação usando o ID que o Magento acabou de gerar ###
+                $this->client->forceImageRoles($sku, $imageName, $mediaId);
+                
+                // Atualiza o timestamp para não processar novamente sem necessidade
+                $this->client->updateProductAttributes($sku, [
+                    ['attribute_code' => 'galle_image_timestamp', 'value' => $timestampXml]
+                ]);
+
+                $resultado['status'] = 'sucesso';
+                $resultado['mensagem'] = 'Imagem e marcações enviadas com sucesso.';
+            }
+
+        } catch (\Throwable $e) {
+            $resultado['status'] = 'erro';
+            $resultado['mensagem'] = $e->getMessage();
+        } finally {
+            if (file_exists($tempFile)) unlink($tempFile);
+        }
+
+        return $resultado;
+    }
+}
