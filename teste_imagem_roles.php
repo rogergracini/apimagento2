@@ -1,27 +1,21 @@
 <?php
-// Inclui o autoloader do Composer para carregar suas classes
+// Inclui o autoloader do Composer
 require_once __DIR__ . '/vendor/autoload.php';
 
-// Ajuste o namespace abaixo conforme o que você usa no seu MagentoApiClient
 use App\MagentoApiClient; 
 
 try {
-    // Instancia o seu cliente da API
     $client = new MagentoApiClient();
     
     $sku = '06-1124-1';
     echo "Buscando imagens do SKU: {$sku}...\n";
 
-    // 1. Busca as mídias (imagens) já cadastradas no produto
-    $response = $client->get("products/" . urlencode($sku) . "/media");
-    $imagens = json_decode($response, true);
+    // 1. Busca as mídias usando a função que já existe no seu arquivo
+    $imagens = $client->getProductImages($sku);
 
-    // Verifica se retornou erro ou se não tem imagens
-    if (isset($imagens['message'])) {
-        die("Erro na API: " . $imagens['message'] . "\n");
-    }
-    if (empty($imagens)) {
-        die("Nenhuma imagem encontrada no produto para atualizar.\n");
+    // Verifica se retornou vazio
+    if (empty($imagens) || isset($imagens['message'])) {
+        die("Nenhuma imagem encontrada no produto para atualizar ou erro de API.\n");
     }
 
     // 2. Pega a primeira imagem cadastrada
@@ -32,30 +26,25 @@ try {
     echo "Imagem encontrada! ID: {$entryId} | Arquivo: {$arquivoImg}\n";
     echo "Aplicando as roles (Base, Small, Thumbnail)...\n";
 
-    // 3. Monta o payload para atualizar APENAS as roles dessa imagem
+    // 3. Monta o payload para atualizar as roles
     $payload = [
-        'entry' => [
-            'id' => $entryId,
-            'media_type' => 'image',
-            'label' => $imagemAlvo['label'] ?? 'Imagem do Produto',
-            'position' => 1,
-            'disabled' => false,
-            // É aqui que a mágica acontece: informamos os tipos que queremos marcar!
-            'types' => ['image', 'small_image', 'thumbnail'], 
-            'file' => $arquivoImg
-        ]
+        'id' => $entryId,
+        'media_type' => 'image',
+        'label' => $imagemAlvo['label'] ?? 'Imagem do Produto',
+        'position' => 1,
+        'disabled' => false,
+        'types' => ['image', 'small_image', 'thumbnail'], // Tipos que queremos forçar!
+        'file' => $arquivoImg
     ];
 
-    // 4. Dispara o PUT para atualizar a entrada de mídia específica
-    $updateEndpoint = "products/" . urlencode($sku) . "/media/{$entryId}";
-    $updateResponse = $client->put($updateEndpoint, json_encode($payload));
-    
-    $resultado = json_decode($updateResponse, true);
+    // 4. Chama a função nova que acabamos de adicionar
+    $resultado = $client->updateProductImageRoles($sku, $entryId, $payload);
 
-    if (isset($resultado['message'])) {
+    if (isset($resultado['error'])) {
         echo "Erro ao atualizar: " . $resultado['message'] . "\n";
+        echo "Detalhes: " . $resultado['response'] . "\n";
     } else {
-        echo "Sucesso! A imagem foi marcada como Base, Small e Thumbnail no Magento.\n";
+        echo "Sucesso! Vá no painel do Magento e verifique se as 3 bolinhas estão marcadas.\n";
     }
 
 } catch (Exception $e) {

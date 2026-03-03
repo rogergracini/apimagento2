@@ -203,6 +203,26 @@ class MagentoApiClient
         }
     }
 
+
+        public function updateProductImageRoles(string $sku, int $mediaEntryId, array $imagePayload): array
+            {
+                try {
+                    $response = $this->client->put("V1/products/{$sku}/media/{$mediaEntryId}", [
+                        'json' => ['entry' => $imagePayload]
+                    ]);
+                    return ['success' => true, 'message' => 'Roles da imagem atualizadas com sucesso.'];
+                } catch (RequestException $e) {
+                    $errorBody = $e->hasResponse() ? $e->getResponse()->getBody()->getContents() : 'N/A';
+                    return [
+                        'error' => true,
+                        'message' => $e->getMessage(),
+                        'response' => $errorBody,
+                    ];
+                }
+            }
+
+
+
     
     // Adicionei logs de erro também ao setPrecoPorGrupo para consistência
     public function setPrecoPorGrupo(string $sku, int $grupoId, float $preco): array
