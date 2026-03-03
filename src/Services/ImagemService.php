@@ -101,14 +101,33 @@ class ImagemService
                 'content' => ['base64_encoded_data' => $fileContent, 'type' => $mimeType, 'name' => $imageName]
             ];
 
+
+
+
+
+
+
             $respostaUpload = $this->client->uploadImageToProduct($sku, $payload);
             if (isset($respostaUpload['error']) && $respostaUpload['error']) {
                 throw new \Exception($respostaUpload['message'] ?? 'Erro da API de mídia do Magento.');
             }
 
+            // ----- NOVA CHAMADA PARA FORÇAR AS MARCAÇÕES -----
+            // Se for a imagem principal (Base), chamamos a função que corrige o bug do painel
+            if ($isBaseImage) {
+                $this->client->forceGlobalImageRoles($sku);
+            }
+            // --------------------------------------------------
+
             $resultado['status'] = 'sucesso';
             $resultado['mensagem'] = 'Imagem atualizada com sucesso.';
             $resultado['timestamp_atualizado'] = $timestampXml;
+
+
+
+
+
+
 
         } catch (\Throwable $e) {
             $resultado['status'] = 'erro_processamento';

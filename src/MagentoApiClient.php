@@ -262,4 +262,71 @@ class MagentoApiClient
             ];
         }
     }
+
+
+    /**
+     * Força a marcação Base, Small e Thumbnail na primeira imagem do produto
+     * no escopo global (All), resolvendo o bug do painel do Magento.
+     */
+    public function forceGlobalImageRoles(string $sku): array
+    {
+        try {
+            // 1. Força a URL para o escopo Global (All)
+            $apiUrl = rtrim($_ENV['MAGENTO_API_URL'], '/');
+            if (strpos($apiUrl, '/rest/all') === false) {
+                $apiUrl = str_replace('/rest', '/rest/all', $apiUrl);
+                if (strpos($apiUrl, '/rest/all') === false) {
+                     $apiUrl .= '/rest/all/';
+                }
+            }
+            $apiUrl = rtrim($apiUrl, '/') . '/';
+
+            // Cria um client Guzzle dedicado para a URL Global
+            $globalClient = new \GuzzleHttp\Client([
+                'base_uri' => $apiUrl,
+                'headers' => [
+                    'Authorization' => 'Bearer ' . $this->accessToken,
+                    'Content-Type'  => 'application/json',
+                    'Accept'        => 'application/json',
+                ],
+                'verify' => false
+            ]);
+
+            // 2. Busca o produto completo para ler as imagens atuais
+            $response = $globalClient->get("V1/products/" . urlencode($sku));
+            $produto = json_decode($response->getBody()->getContents(), true);
+
+            if (empty($produto['media_gallery_entries'])) {
+                 return ['error' => true, 'message' => 'O produto não possui imagens para aplicar as roles.'];
+            }
+
+            // 3. Pega a PRIMEIRA imagem da galeria (índice 0) e aplica as marcações
+            $imagem = $produto['media_gallery_entries'][0];
+            $imagem['types'] = ['image', 'small_image', 'thumbnail'];
+
+            // 4. Monta o payload forçando os types
+            $payload = [
+                'product' => [
+                    'sku' => $sku,
+                    'media_gallery_entries' => [ $imagem ]
+                ]
+            ];
+
+            // 5. Salva o produto via PUT forçando a atualização global
+            $globalClient->put("V1/products/" . urlencode($sku), [
+                'json' => $payload
+            ]);
+
+            return ['success' => true, 'message' => 'Roles (Base, Small, Thumbnail) marcadas no escopo global.'];
+
+        } catch (\GuzzleHttp\Exception\RequestException $e) {
+            $errorBody = $e->hasResponse() ? $e->getResponse()->getBody()->getContents() : 'N/A';
+            error_log("MagentoApiClient::forceGlobalImageRoles - Erro no SKU {$sku}: " . $errorBody);
+            return ['error' => true, 'message' => $e->getMessage(), 'response' => $errorBody];
+        }
+    }
+
 }
+
+
+

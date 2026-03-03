@@ -1,0 +1,80 @@
+<?php
+require_once __DIR__ . '/vendor/autoload.php';
+
+use GuzzleHttp\Client;
+use GuzzleHttp\Exception\RequestException;
+
+try {
+    // Carrega as variáveis de ambiente
+    $dotenv = Dotenv\Dotenv::createImmutable(__DIR__);
+    $dotenv->load();
+
+    // Vamos forçar o escopo 'all' na URL para garantir que aplique globalmente
+    $apiUrl = rtrim($_ENV['MAGENTO_API_URL'], '/');
+    if (strpos($apiUrl, '/rest/all') === false) {
+        $apiUrl = str_replace('/rest', '/rest/all', $apiUrl);
+        if (strpos($apiUrl, '/rest/all') === false) {
+             $apiUrl .= '/rest/all/';
+        }
+    }
+    $apiUrl = rtrim($apiUrl, '/') . '/';
+
+    $token = $_ENV['MAGENTO_ACCESS_TOKEN'];
+    $sku = '06-1103FW1';
+
+    echo "=== TENTATIVA DEFINITIVA DE MARCAR IMAGEM ===\n";
+    echo "Conectando na URL Global: {$apiUrl}\n";
+
+    $client = new Client([
+        'base_uri' => $apiUrl,
+        'headers' => [
+            'Authorization' => 'Bearer ' . $token,
+            'Content-Type'  => 'application/json',
+            'Accept'        => 'application/json',
+        ],
+        'verify' => false
+    ]);
+
+    // 1. Puxamos o produto completo
+    echo "Buscando dados completos do produto...\n";
+    $response = $client->get("V1/products/" . urlencode($sku));
+    $produto = json_decode($response->getBody()->getContents(), true);
+
+    if (empty($produto['media_gallery_entries'])) {
+        die("ERRO: O produto não possui imagens na galeria para atualizar.\n");
+    }
+
+    // 2. Pegamos a primeira imagem e injetamos os types nela
+    $imagem = $produto['media_gallery_entries'][0];
+    echo "Imagem encontrada (ID: {$imagem['id']}). Forçando as roles...\n";
+
+    $imagem['types'] = ['image', 'small_image', 'thumbnail'];
+
+    // 3. Montamos o payload. O Magento exige que enviemos a estrutura do produto para salvar corretamente.
+    $payload = [
+        'product' => [
+            'sku' => $sku,
+            'media_gallery_entries' => [ $imagem ]
+        ]
+    ];
+
+    // 4. Damos um PUT no produto (isso dispara todos os "salvamentos" internos do Magento)
+    $updateResponse = $client->put("V1/products/" . urlencode($sku), [
+        'json' => $payload
+    ]);
+
+    $resultado = json_decode($updateResponse->getBody()->getContents(), true);
+    
+    echo "=================================================\n";
+    echo "SUCESSO! As roles foram forçadas no escopo Global do Magento.\n";
+    echo "Vá no painel, limpe o cache (se necessário) e verifique o produto.\n";
+    echo "=================================================\n";
+
+} catch (RequestException $e) {
+    echo "ERRO HTTP: " . $e->getMessage() . "\n";
+    if ($e->hasResponse()) {
+        echo "DETALHES DO MAGENTO: " . $e->getResponse()->getBody()->getContents() . "\n";
+    }
+} catch (Exception $e) {
+    echo "Erro inesperado: " . $e->getMessage() . "\n";
+}
